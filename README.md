@@ -18,4 +18,4 @@ Useful TrueNAS scripts collection
 
 
 ## Origin
-Most scripts are collected from: https://github.com/Spearfoot/FreeNAS-scripts
+Some scripts are collected from: https://github.com/Spearfoot/FreeNAS-scripts
