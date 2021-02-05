@@ -6,6 +6,8 @@ email=""
 # zpool output changed from FreeNAS version 11.0 to 11.1, breaking
 # our parsing of the scrubErrors and scrubDate variables. Added a
 # conditional to test for the FreeNAS version and parse accordingly.
+# This changed again with the release of TrueNAS. Ironically, back to
+# the way parsing worked with older versions of FreeNAS.
 #
 # We obtain the FreeBSD version using uname, as suggested by user
 # Chris Moore on the FreeBSD forum.
@@ -14,6 +16,16 @@ email=""
 #
 #   FreeBSD 11.0  1100512
 #   FreeBSD 11.1  1101505
+#   FreeBSD 12.2  1202000
+# 
+# If a scrub runs longer than 24 hours, we have two additional tokens to parse in the 
+# zpool status scan line output ("'x' days"):
+# 
+# 1     2     3        4  5  6 7    8        9    10 11    12 13  14  15 16      17
+# scan: scrub repaired 0B in 1 days 11:56:46 with 0 errors on Wed Dec 9 06:07:04 2020
+# 
+# 1     2     3        4  5  6        7    8 9      10 11  12  13 14       15
+# scan: scrub repaired 0B in 00:09:11 with 0 errors on Sun Dec 13 17:31:24 2020
 
 fbsd_relver=$(uname -K)
 
@@ -51,12 +63,16 @@ Content-Disposition: inline
   echo "+--------------+--------+------+------+------+----+----+--------+------+-----+"
 ) >> ${logfile}
 
-for pool in $pools; do
-  if [ "${pool}" = "freenas-boot" ]; then
-    frag=""
+  if [ "$fbsd_relver" -ge 1101000 ]; then
+    frag="$(zpool list -H -o frag "$pool")"   
   else
-    frag="$(zpool list -H -o frag "$pool")"
+    if [ "${pool}" = "freenas-boot" ] || [ "${pool}" = "boot-pool" ]; then
+      frag=""
+    else
+      frag="$(zpool list -H -o frag "$pool")"
+    fi
   fi
+
   status="$(zpool list -H -o health "$pool")"
   errors="$(zpool status "$pool" | grep -E "(ONLINE|DEGRADED|FAULTED|UNAVAIL|REMOVED)[ \t]+[0-9]+")"
   readErrors=0
@@ -91,8 +107,15 @@ for pool in $pools; do
   scrubErrors="N/A"
   scrubAge="N/A"
   if [ "$(zpool status "$pool" | grep "scan" | awk '{print $2}')" = "scrub" ]; then
+    parseLong=0
+    if [ "$fbsd_relver" -gt 1101000 ] && [ "$fbsd_relver" -lt 1200000 ]; then
+      parseLong=$((parseLong+1))
+    fi
+    if [ "$(zpool status "$pool" | grep "scan" | awk '{print $7}')" = "days" ]; then
+      parseLong=$((parseLong+1))
+    fi 
     scrubRepBytes="$(zpool status "$pool" | grep "scan" | awk '{print $4}')"
-    if [ "$fbsd_relver" -gt 1101000 ]; then
+    if [ $parseLong -gt 0 ]; then
       scrubErrors="$(zpool status "$pool" | grep "scan" | awk '{print $10}')"
       scrubDate="$(zpool status "$pool" | grep "scan" | awk '{print $17"-"$14"-"$15"_"$16}')"
     else
@@ -103,19 +126,18 @@ for pool in $pools; do
     currentTS="$(date "+%s")"
     scrubAge=$((((currentTS - scrubTS) + 43200) / 86400))
   fi
-  if [ "$status" = "FAULTED" ] \
-  || [ "$used" -gt "$usedCrit" ] \
-  || ( [ "$scrubErrors" != "N/A" ] && [ "$scrubErrors" != "0" ] )
-  then
+  if [ "$status" = "FAULTED" ] || [ "$used" -gt "$usedCrit" ]; then
+    symbol="$critSymbol"  
+  elif [ "$scrubErrors" != "N/A" ] && [ "$scrubErrors" != "0" ]; then
     symbol="$critSymbol"
   elif [ "$status" != "ONLINE" ] \
   || [ "$readErrors" != "0" ] \
   || [ "$writeErrors" != "0" ] \
   || [ "$cksumErrors" != "0" ] \
   || [ "$used" -gt "$usedWarn" ] \
-  || [ "$scrubRepBytes" != "0" ] \
-  || [ "$(echo "$scrubAge" | awk '{print int($1)}')" -gt "$scrubAgeWarn" ]
-  then
+  || [ "$(echo "$scrubAge" | awk '{print int($1)}')" -gt "$scrubAgeWarn" ]; then
+    symbol="$warnSymbol"  
+  elif [ "$scrubRepBytes" != "0" ] &&  [ "$scrubRepBytes" != "0B" ] && [ "$scrubRepBytes" != "N/A" ]; then
     symbol="$warnSymbol"
   else
     symbol=" "
