@@ -1,3 +1,5 @@
+#!/bin/sh
+
 ### Parameters ###
 
 # Specify your email address here:
@@ -36,12 +38,21 @@ get_smart_drives()
   done
 }
 
-# Get list of SATA disks
+# Get list of SATA disks, including older drives that only report an ATA version
 get_sata_drives()
 {
   for drive in $Drive_list; do
+    lFound=0
     gsata_smart_flag=$("$smartctl" -i "$drive" | grep -E "SATA Version is:[[:blank:]]" | awk '{print $4}')
     if [ "$gsata_smart_flag" = "SATA" ]; then
+      lFound=$((lFound + 1))
+    else
+      gsata_smart_flag=$("$smartctl" -i "$drive" | grep -E "ATA Version is:[[:blank:]]" | awk '{print $1}')
+      if [ "$gsata_smart_flag" = "ATA" ]; then  
+        lFound=$((lFound + 1))
+      fi
+    fi
+    if [ $lFound -gt 0 ]; then  
       SATA_list="$SATA_list $drive"
       SATA_count=$((SATA_count + 1))
     fi
@@ -92,7 +103,7 @@ if [ $SATA_count -gt 0 ]; then
    echo "|      |                        |    | Hours|Count|Count|       |Sectors|Sectors |      |          |Writes|    Count  |Age |"
    echo "+------+------------------------+----+------+-----+-----+-------+-------+--------+------+----------+------+-----------+----+"
   ) >> "$logfile"
-
+  
   ###### Detail information for each SATA drive ######
   for drive in $SATA_list; do
     (
@@ -104,8 +115,10 @@ if [ $SATA_count -gt 0 ]; then
     -v lastTestHours="$lastTestHours" '
     /Serial Number:/{serial=$3}
     /190 Airflow_Temperature/{temp=$10}
+    /190 Temperature_Case/{temp=$10}
     /194 Temperature/{temp=$10}
     /Power_On_Hours/{split($10,a,"+");sub(/h/,"",a[1]);onHours=a[1];}
+    /Power_Cycle_Count/{startStop=$10}
     /Start_Stop_Count/{startStop=$10}
     /Spin_Retry_Count/{spinRetry=$10}
     /Reallocated_Sector/{reAlloc=$10}
@@ -140,7 +153,8 @@ if [ $SATA_count -gt 0 ]; then
     ) >> "$logfile"
   done
   (
-    echo "+------+------------------------+----+------+-----+-----+-------+-------+--------+------+----------+------+-----------+----+"  ) >> "$logfile"
+    echo "+------+------------------------+----+------+-----+-----+-------+-------+--------+------+----------+------+-----------+----+"
+  ) >> "$logfile"
 fi
 
 ###### Summary for SAS drives ######
@@ -149,7 +163,7 @@ if [ $SAS_count -gt 0 ]; then
     if [ $SATA_count -gt 0 ]; then
       echo ""
     fi
-
+  
     echo "########## SMART status report summary for all SAS drives on server ${freenashost} ##########"
     echo ""
     echo "+------+------------------------+----+-----+------+------+------+------+------+------+"
@@ -158,7 +172,7 @@ if [ $SAS_count -gt 0 ]; then
     echo "|      |                        |    |Count|Count |Elems |Errors|Errors|Errors|Errors|"
     echo "+------+------------------------+----+-----+------+------+------+------+------+------+"
   ) >> "$logfile"
-
+  
   ###### Detail information for each SAS drive ######
   for drive in $SAS_list; do
     (
@@ -192,7 +206,7 @@ if [ $SAS_count -gt 0 ]; then
 fi
 
 if [ $SATA_count -gt 0 ] || [ $SAS_count -gt 0 ]; then
-
+ 
   ###### Emit SATA drive information ######
   for drive in $SATA_list; do
     vendor=$("$smartctl" -i "$drive" | grep "Vendor:" | awk '{print $NF}')
@@ -213,12 +227,12 @@ if [ $SATA_count -gt 0 ] || [ $SAS_count -gt 0 ]; then
     (
     echo ""
     echo "########## SATA drive $drive Serial: $serial"
-    echo "########## ${dinfo}"
+    echo "########## ${dinfo}" 
     "$smartctl" -n never -H -A -l error "$drive"
     "$smartctl" -n never -l selftest "$drive" | grep "# 1 \\|Num" | cut -c6-
     ) >> "$logfile"
   done
-
+  
   ###### Emit SAS drive information ######
   for drive in $SAS_list; do
     devid=$(basename "$drive")
@@ -251,6 +265,5 @@ if [ -z "${email}" ]; then
   echo "No email address specified, information available in ${logfile}"
 else
   sendmail -t -oi < "$logfile"
- #rm "$logfile"
+  #rm "$logfile"
 fi
-
