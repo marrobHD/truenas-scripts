@@ -1,108 +1,162 @@
 #!/bin/sh
 
+#################################################
+# Backup FreeNAS configuration files
+# 
+# Copies the FreeNAS sqlite3 configuration and password secret
+# seed files to the location you specify in the 'configdir'
+# variable below.
+# 
+# OPTIONAL: 
+# 
+# By specifying your email address in the 'email' variable, you may choose to
+# have the configuration file emailed to you in an encrypted tarball.
+# 
+#################################################
+
 rundate=$(date)
 
-#################################################
-# Backup the FreeNAS configuration file
-#################################################
-
-# Optional: specify your email address here if you want to receive notification
+# Optional: specify your email address here if you want to the script to email
+# you the configuration file in an encrypted tarball. 
+# 
+# Leave the email address blank to simply copy the configuration file to the
+# destination you specify with the 'configdir' setting below.
 email=""
-
-# Optional: specify the short name of your ESXi host if you are running FreeNAS
-# as a VM and you want to back up the ESXi host's configuration
-esxihost=""
 
 # Specify the dataset on your system where you want the configuration files copied.
 # Don't include the trailing slash.
 
 # Example: configdir=/mnt/tank/sysadmin/config
+configdir=""
 
-configdir="~"
+# OpenSSL encryption passphrase file. Enter the passphrase on the the first line in
+# the file. This file should have 0600 permissions.
+enc_passphrasefile=/root/config_passphrase
 
-# Remove this code once you've defined configdir above... :-)
-
-if [ -z ${configdir} ]; then
-  echo "Edit script and specify the target directory ('configdir') before using $0"
-  exit 2
-fi
-
+# FreeNAS hostname:
 freenashost=$(hostname -s)
 
-fnconfigdest_version=$(< /etc/version sed -e 's/)//;s/(//;s/ /-/' | tr -d '\n')
-fnconfigdest_date=$(date +%Y%m%d%H%M%S)
-fnconfigdest="${configdir}"/"${freenashost}"-"${fnconfigdest_version}"-"${fnconfigdest_date}".db
+# FreeBSD version:
+fbsd_relver=$(uname -K)
 
-echo "Backup FreeNAS configuration database file: ${fnconfigdest}"
-
-iscorral=$(< /etc/version grep "Corral" | awk {'print $1'})
-
-if [ ! -z "${iscorral}" ]; then
-  # FreeNAS Corral: make a CLI call:
-  cli -e "system config download path=${fnconfigdest}"
-else
-  # FreeNAS 9.x: Copy the source to the destination:
-  cp /data/freenas-v1.db "${fnconfigdest}"
-fi
-
-l_status=$?
+# MIME boundary
+mime_boundary="==>>> MIME boundary; FreeNAS server [${freenashost}] <<<=="
 
 #################################################
-# Backup the VMware ESXi host configuration:
+# Append file attachment to current email message
 #################################################
+ 
+append_file() 
+{
+  l_mimetype=""
 
-if [ ! -z "${esxihost}" ]; then
-  esxihostname=$(ssh root@"${esxihost}" hostname)
-  esxiversion=$(ssh root@"${esxihost}" uname -a | sed -e "s|VMkernel ||;s|$esxihostname ||")
-  esxiconfig_url=$(ssh root@"${esxihost}" vim-cmd hostsvc/firmware/backup_config | awk '{print $7}' | sed -e "s|*|$esxihostname|")
-  esxiconfig_date=$(date +%Y%m%d%H%M%S)
-  esxiconfig_file="${configdir}"/"${esxihost}"-configBundle-"${esxiconfig_date}".tgz
+  if [ -f "$1" ]; then
+    l_mimetype=$(file --mime-type "$1" | sed 's/.*: //')
 
-  echo "Downloading $esxiconfig_url to $esxiconfig_file"
-  wget --no-check-certificate --output-document="${esxiconfig_file}" "${esxiconfig_url}"
-fi
-
-#################################################
-# Send email notification if indicated:
-#################################################
-
-if [ ! -z "${email}" ]; then
-  freenashostuc=$(hostname -s | tr '[:lower:]' '[:upper:]')
-  freenashostname=$(hostname)
-  freenasversion=$(cat /etc/version)
-  logfile="/tmp/save_config.tmp"
-  if [ $l_status -eq 0 ]; then
-    subject="FreeNAS configuration saved on server ${freenashostuc}"
-  else
-    subject="FreeNAS configuration backup failed on server ${freenashostuc}"
+    printf '%s\n' "--${mime_boundary}
+Content-Type: $l_mimetype
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename=\"$(basename "$1")\"
+"
+    base64 "$1"
+    echo
   fi
-  (
-    echo "To: ${email}"
-    echo "Subject: ${subject}"
-    echo "Content-Type: text/html"
-    echo "MIME-Version: 1.0"
-    printf "\r\n"
-    echo "<pre style=\"font-size:14px\">"
-    if [ $l_status -eq 0 ]; then
-      echo "Configuration file saved successfully on ${rundate}"
-    else
-      echo "Configuration backup failed with status=${l_status} on ${rundate}"
-    fi
-    echo ""
-    echo "FreeNAS:"
-    echo "Server: ${freenashostname}"
-    echo "Version: ${freenasversion}"
-    echo "File: ${fnconfigdest}"
-    if [ ! -z "${esxihost}" ]; then
-      echo ""
-      echo "ESXi:"
-      echo "Server: ${esxihostname}"
-      echo "Version: ${esxiversion}"
-      echo "File: ${esxiconfig_file}"
-    fi
-    echo "</pre>"
-  ) > ${logfile}
-  sendmail ${email} < ${logfile}
-  rm ${logfile}
+}
+
+#################################################
+# Backup the FreeNAS configuration file
+#################################################
+
+fnconfigdest_version=$(< /etc/version sed -e 's/)//;s/(//;s/ /-/' | tr -d '\n') 
+fnconfigdest_date=$(date +%Y%m%d%H%M%S)
+fnconfigdest_base="$freenashost"-"$fnconfigdest_version"-"$fnconfigdest_date".db
+fnconfigdest="$configdir"/"$fnconfigdest_base"
+fnconfigtarball=./"$freenashost"-"$fnconfigdest_version"-"$fnconfigdest_date".tar.gz
+fnconfigtarballenc=./"$freenashost"-"$fnconfigdest_version"-"$fnconfigdest_date".tar.gz.enc
+
+echo "Backup configuration database file: $fnconfigdest" 
+
+# Copy the source database and password encryption secret seed file to the destination:
+
+/usr/local/bin/sqlite3 /data/freenas-v1.db ".backup main '${fnconfigdest}'"
+l_status=$?
+cp -f /data/pwenc_secret "$configdir"
+
+if [ -z "$email" ]; then
+# No email message requested, show status and exit:
+  echo "Configuration file copied with status ${l_status}"
+  exit $l_status
 fi
 
+#########################################################
+# Send email message with encrypted config files attached
+#########################################################
+
+fnconfigtarball=./"$freenashost"-"$fnconfigdest_version"-"$fnconfigdest_date".tar.gz
+fnconfigtarballenc=./"$freenashost"-"$fnconfigdest_version"-"$fnconfigdest_date".tar.gz.enc
+
+# Validate the configuration file and create tarball:
+
+if [ $l_status -eq 0 ]; then
+  dbstatus=$(sqlite3 "$fnconfigdest" "pragma integrity_check;")
+  printf 'sqlite3 status: [%s]\n' "$dbstatus"
+  if [ "$dbstatus" = "ok" ]; then
+    tar -czvf "$fnconfigtarball" -C "$configdir" "$fnconfigdest_base" pwenc_secret
+    l_status=$?
+    printf 'tar status: [%s]\n' "$l_status"
+  else
+    l_status=1
+  fi
+  if [ $l_status -eq 0 ]; then
+    if [ "$fbsd_relver" -ge 1200000 ]; then
+      openssl enc -e -aes-256-cbc -md sha512 -pbkdf2 -iter 128000 -salt -S "$(openssl rand -hex 8)" -pass file:"$enc_passphrasefile" -in "$fnconfigtarball" -out "$fnconfigtarballenc"
+    else
+      openssl enc -e -aes-256-cbc -md sha512 -salt -S "$(openssl rand -hex 4)" -pass file:"$enc_passphrasefile" -in "$fnconfigtarball" -out "$fnconfigtarballenc"
+    fi
+    l_status=$?
+    printf 'openssl status: [%s]\n' "$l_status"
+  fi
+fi
+
+freenashostuc=$(hostname -s | tr '[:lower:]' '[:upper:]')
+freenashostname=$(hostname)
+freenasversion=$(cat /etc/version) 
+if [ $l_status -eq 0 ]; then
+  subject="FreeNAS configuration saved on server ${freenashostuc}"
+  savestatus="FreeNAS configuration file saved successfully on ${rundate}"
+else
+  subject="FreeNAS configuration backup failed on server ${freenashostuc}"
+  savestatus="FreeNAS configuration backup failed with status=${l_status} on ${rundate}"
+fi
+logfile="/tmp/save_config_enc.tmp"
+{ 
+printf '%s\n' "From: root
+To: ${email}
+Subject: ${subject}
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary=\"$mime_boundary\"
+
+--${mime_boundary}
+Content-Type: text/plain; charset=\"US-ASCII\"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: inline
+
+${savestatus}
+
+Server: ${freenashostname}
+Version: ${freenasversion}
+File: ${fnconfigdest}
+"
+
+if [ $l_status -eq 0 ]; then
+  append_file "$fnconfigtarballenc"
+fi
+
+# print last boundary with closing --
+printf '%s\n' "--${mime_boundary}--"
+} > "$logfile"
+
+sendmail -t -oi < "$logfile"
+rm "$logfile"
+rm "$fnconfigtarball"
+rm "$fnconfigtarballenc"
