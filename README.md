@@ -1,4 +1,5 @@
 # TrueNAS-scripts
+⚠️Most scripts are made for TrueNAS Core. These scripts don't work on Scale⚠️ 
 Useful TrueNAS scripts collection
 
 ## connections.sh
